@@ -8,19 +8,16 @@ const COOKIE_NAME = "admin_session";
 
 // 1. Helper Functions
 
-// Data အရှည်ကြီးတွေကို ဖြတ်ပြီးသိမ်းထားရာကနေ ပြန်ဆက်ပေးတဲ့ Function
+// Data အရှည်ကြီးတွေကို ပြန်ဆက်ပေးတဲ့ Function
 async function getVpnData() {
-  // အပိုင်းဘယ်နှစ်ပိုင်းရှိလဲ အရင်ကြည့်မယ်
   const countRes = await kv.get(["config", "VpnData_Count"]);
   const count = countRes.value || 0;
 
-  // အပိုင်းမရှိရင် အရင်နည်းဟောင်းနဲ့ စမ်းကြည့်မယ် (Migration logic)
   if (!count) {
     const old = await kv.get(["config", "VpnData"]);
     return old.value || "";
   }
 
-  // အပိုင်းတွေ အကုန်လိုက်ဆက်မယ်
   let fullString = "";
   for (let i = 0; i < count; i++) {
     const chunk = await kv.get(["config", "VpnData_Chunk", i]);
@@ -29,20 +26,28 @@ async function getVpnData() {
   return fullString;
 }
 
-// Data အရှည်ကြီးတွေကို 60KB စီ ဖြတ်ပြီးသိမ်းတဲ့ Function
+// Data အရှည်ကြီးတွေကို အပိုင်းသေးသေးလေးတွေ (8000 စာလုံးစီ) ဖြတ်သိမ်းမယ့် Function
 async function saveVpnData(longString: string) {
-  const CHUNK_SIZE = 60000; // 60KB (Safe limit)
+  // အရင် Data အဟောင်းတွေကို အရင်ဖျက်မယ် (Clean up)
+  const oldCount = await kv.get(["config", "VpnData_Count"]);
+  if (oldCount.value) {
+    for (let i = 0; i < (oldCount.value as number); i++) {
+        await kv.delete(["config", "VpnData_Chunk", i]);
+    }
+  }
+
+  // Safe limit for special characters is around 8000-10000 chars
+  const CHUNK_SIZE = 8000; 
   const chunks = [];
   
-  // စာသားကို အပိုင်းပိုင်းဖြတ်မယ်
   for (let i = 0; i < longString.length; i += CHUNK_SIZE) {
     chunks.push(longString.slice(i, i + CHUNK_SIZE));
   }
 
-  // အပိုင်းအရေအတွက်ကို သိမ်းမယ်
+  // Save Count
   await kv.set(["config", "VpnData_Count"], chunks.length);
 
-  // တစ်ပိုင်းစီ လိုက်သိမ်းမယ်
+  // Save Chunks one by one
   for (let i = 0; i < chunks.length; i++) {
     await kv.set(["config", "VpnData_Chunk", i], chunks[i]);
   }
@@ -124,14 +129,10 @@ serve(async (req) => {
 
   // --- LINK 2: VPN SERVER DATA (/vpn) ---
   if (url.pathname === "/vpn") {
-    // Note: VPN config might be needed by browser sometimes for debugging, 
-    // but usually kept secure. Unblocking browser for now if you need to test link.
-    // If you want to block browser, uncomment the lines below:
-    /*
-    if (isBrowser && !isLoggedIn) {
-      return new Response("Access Denied", { status: 403 });
-    }
-    */
+    // Uncomment next 3 lines if you want to block browser
+    // if (isBrowser && !isLoggedIn) {
+    //   return new Response("Access Denied", { status: 403 });
+    // }
     
     const vpnData = await getVpnData();
     return new Response(vpnData, {
@@ -150,7 +151,7 @@ serve(async (req) => {
       if (history.value) {
         return new Response(html("Failed", `
           <div class="text-center text-red-600">
-            <h1 class="text-2xl font-bold mb-2">Sorry!</h1>
+            <h1 class="text-2xl font-bold mb-2">Used!</h1>
             <p>Device ID <b>${id}</b> has already used the trial.</p>
             <a href="/trial" class="block mt-4 text-blue-500 underline">Back</a>
           </div>
@@ -202,31 +203,41 @@ serve(async (req) => {
 
   // --- ADMIN ACTIONS ---
   if (req.method === "POST") {
-    const form = await req.formData();
-    const action = form.get("action");
+    try {
+      const form = await req.formData();
+      const action = form.get("action");
 
-    if (action === "update_config") {
-      await kv.set(["config", "AdminUrl"], form.get("AdminUrl"));
-      await kv.set(["config", "Marquee"], form.get("Marquee"));
-    } 
-    else if (action === "update_vpn") {
-      // Use helper function to save chunks
-      const vpnString = form.get("VpnData") as string;
-      await saveVpnData(vpnString);
+      if (action === "update_config") {
+        await kv.set(["config", "AdminUrl"], form.get("AdminUrl"));
+        await kv.set(["config", "Marquee"], form.get("Marquee"));
+      } 
+      else if (action === "update_vpn") {
+        const vpnString = form.get("VpnData") as string;
+        await saveVpnData(vpnString);
+      }
+      else if (action === "add_user") {
+        const id = form.get("ID") as string;
+        let expiry = form.get("Expiry") as string;
+        if(expiry.includes("-")) { const [y, m, d] = expiry.split("-"); expiry = `${d}/${m}/${y}`; }
+        await kv.set(["users", id], { ID: id, Expiry: expiry });
+      } 
+      else if (action === "delete_user") {
+        await kv.delete(["users", form.get("ID") as string]);
+      } 
+      else if (action === "reset_trial") {
+        await kv.delete(["trial_history", form.get("ID") as string]);
+      }
+      return Response.redirect(url.origin);
+    } catch (e) {
+      // Error Handling Display
+      return new Response(html("Error", `
+        <div class="text-red-600 p-4 border border-red-400 bg-red-50 rounded">
+          <h1 class="font-bold text-lg">System Error</h1>
+          <p>${e.message}</p>
+          <a href="/" class="underline mt-4 block">Go Back</a>
+        </div>
+      `), { headers: {"content-type": "text/html"} });
     }
-    else if (action === "add_user") {
-      const id = form.get("ID") as string;
-      let expiry = form.get("Expiry") as string;
-      if(expiry.includes("-")) { const [y, m, d] = expiry.split("-"); expiry = `${d}/${m}/${y}`; }
-      await kv.set(["users", id], { ID: id, Expiry: expiry });
-    } 
-    else if (action === "delete_user") {
-      await kv.delete(["users", form.get("ID") as string]);
-    } 
-    else if (action === "reset_trial") {
-      await kv.delete(["trial_history", form.get("ID") as string]);
-    }
-    return Response.redirect(url.origin);
   }
 
   // --- ADMIN DASHBOARD ---
@@ -318,13 +329,13 @@ serve(async (req) => {
         <div class="bg-white p-5 rounded border shadow-sm h-full flex flex-col">
           <h3 class="font-bold border-b pb-2 mb-3 text-green-700 flex justify-between items-center">
             3. VPN Server Config
-            <span class="text-xs bg-green-100 text-green-800 px-2 py-1 rounded font-normal">Auto Split Enabled</span>
+            <span class="text-xs bg-green-100 text-green-800 px-2 py-1 rounded font-normal">Heavy Data Mode</span>
           </h3>
-          <p class="text-xs text-gray-500 mb-2">Paste your long encrypted config here. System will automatically split it to avoid errors.</p>
+          <p class="text-xs text-gray-500 mb-2">Safe to paste large block characters. Data is auto-split to prevent errors.</p>
           
           <form method="POST" class="flex-grow flex flex-col">
             <input type="hidden" name="action" value="update_vpn">
-            <textarea name="VpnData" class="flex-grow w-full border p-3 rounded font-mono text-[10px] bg-slate-900 text-green-400 focus:ring-2 ring-green-500 outline-none mb-4 min-h-[400px]" placeholder="Paste config here...">${vpnData}</textarea>
+            <textarea name="VpnData" class="flex-grow w-full border p-3 rounded font-mono text-[10px] bg-slate-900 text-green-400 focus:ring-2 ring-green-500 outline-none mb-4 min-h-[400px] whitespace-pre" placeholder="Paste config here...">${vpnData}</textarea>
             <div class="text-right">
               <button class="bg-green-600 text-white py-2 px-6 rounded hover:bg-green-700">Save VPN Data</button>
             </div>
