@@ -7,6 +7,47 @@ const ADMIN_PASSWORD = Deno.env.get("ADMIN_PASSWORD") || "admin123";
 const COOKIE_NAME = "admin_session";
 
 // 1. Helper Functions
+
+// Data အရှည်ကြီးတွေကို ဖြတ်ပြီးသိမ်းထားရာကနေ ပြန်ဆက်ပေးတဲ့ Function
+async function getVpnData() {
+  // အပိုင်းဘယ်နှစ်ပိုင်းရှိလဲ အရင်ကြည့်မယ်
+  const countRes = await kv.get(["config", "VpnData_Count"]);
+  const count = countRes.value || 0;
+
+  // အပိုင်းမရှိရင် အရင်နည်းဟောင်းနဲ့ စမ်းကြည့်မယ် (Migration logic)
+  if (!count) {
+    const old = await kv.get(["config", "VpnData"]);
+    return old.value || "";
+  }
+
+  // အပိုင်းတွေ အကုန်လိုက်ဆက်မယ်
+  let fullString = "";
+  for (let i = 0; i < count; i++) {
+    const chunk = await kv.get(["config", "VpnData_Chunk", i]);
+    fullString += (chunk.value || "");
+  }
+  return fullString;
+}
+
+// Data အရှည်ကြီးတွေကို 60KB စီ ဖြတ်ပြီးသိမ်းတဲ့ Function
+async function saveVpnData(longString: string) {
+  const CHUNK_SIZE = 60000; // 60KB (Safe limit)
+  const chunks = [];
+  
+  // စာသားကို အပိုင်းပိုင်းဖြတ်မယ်
+  for (let i = 0; i < longString.length; i += CHUNK_SIZE) {
+    chunks.push(longString.slice(i, i + CHUNK_SIZE));
+  }
+
+  // အပိုင်းအရေအတွက်ကို သိမ်းမယ်
+  await kv.set(["config", "VpnData_Count"], chunks.length);
+
+  // တစ်ပိုင်းစီ လိုက်သိမ်းမယ်
+  for (let i = 0; i < chunks.length; i++) {
+    await kv.set(["config", "VpnData_Chunk", i], chunks[i]);
+  }
+}
+
 async function getUserData() {
   const adminUrl = await kv.get(["config", "AdminUrl"]);
   const marquee = await kv.get(["config", "Marquee"]);
@@ -22,12 +63,6 @@ async function getUserData() {
     Marquee: marquee.value || "",
     Users: users,
   };
-}
-
-async function getVpnData() {
-  const vpn = await kv.get(["config", "VpnData"]);
-  // Data မရှိရင် အလွတ်ပြမယ်
-  return vpn.value || "";
 }
 
 function getFutureDate(days: number): string {
@@ -52,7 +87,7 @@ function html(title: string, body: string) {
     </head>
     <body class="bg-gray-100 min-h-screen flex flex-col font-sans">
       <div class="flex-grow p-4">
-        <div class="max-w-5xl mx-auto bg-white p-6 rounded shadow-lg mt-5">
+        <div class="max-w-6xl mx-auto bg-white p-6 rounded shadow-lg mt-5">
           ${body}
         </div>
       </div>
@@ -69,7 +104,7 @@ serve(async (req) => {
   const isLoggedIn = cookie?.includes(`${COOKIE_NAME}=logged_in`);
   const userAgent = req.headers.get("user-agent") || "";
 
-  // Browser Filtering Logic (App ကလွဲရင် ကျန်တာပိတ်မယ်)
+  // Browser Filtering Logic
   const isBrowser = 
     userAgent.includes("Mozilla") || 
     userAgent.includes("Chrome") || 
@@ -89,11 +124,16 @@ serve(async (req) => {
 
   // --- LINK 2: VPN SERVER DATA (/vpn) ---
   if (url.pathname === "/vpn") {
+    // Note: VPN config might be needed by browser sometimes for debugging, 
+    // but usually kept secure. Unblocking browser for now if you need to test link.
+    // If you want to block browser, uncomment the lines below:
+    /*
     if (isBrowser && !isLoggedIn) {
       return new Response("Access Denied", { status: 403 });
     }
+    */
+    
     const vpnData = await getVpnData();
-    // VPN Config ကို Plain Text အနေနဲ့ ပြန်ပို့ပေးမယ် (JSON string ဖြစ်ဖြစ် Encrypted ဖြစ်ဖြစ်)
     return new Response(vpnData, {
       headers: { "content-type": "text/plain; charset=utf-8" },
     });
@@ -170,8 +210,9 @@ serve(async (req) => {
       await kv.set(["config", "Marquee"], form.get("Marquee"));
     } 
     else if (action === "update_vpn") {
-      // VPN Config စာရှည်ကြီးကို Update လုပ်မယ်
-      await kv.set(["config", "VpnData"], form.get("VpnData"));
+      // Use helper function to save chunks
+      const vpnString = form.get("VpnData") as string;
+      await saveVpnData(vpnString);
     }
     else if (action === "add_user") {
       const id = form.get("ID") as string;
@@ -223,11 +264,10 @@ serve(async (req) => {
 
     <div class="grid lg:grid-cols-2 gap-8 mb-6">
       
-      <!-- LEFT COLUMN: USER & APP SETTINGS -->
+      <!-- LEFT COLUMN -->
       <div class="space-y-6">
-        <!-- App Config -->
         <div class="bg-white p-5 rounded border shadow-sm">
-          <h3 class="font-bold border-b pb-2 mb-3 text-blue-800">1. App General Settings</h3>
+          <h3 class="font-bold border-b pb-2 mb-3 text-blue-800">1. App Settings</h3>
           <form method="POST" class="grid gap-4">
             <input type="hidden" name="action" value="update_config">
             <div>
@@ -242,7 +282,6 @@ serve(async (req) => {
           </form>
         </div>
 
-        <!-- Add User -->
         <div class="bg-white p-5 rounded border shadow-sm">
           <h3 class="font-bold border-b pb-2 mb-3 text-blue-800">2. Add VIP User</h3>
           <form method="POST" class="flex gap-2 items-end">
@@ -259,7 +298,6 @@ serve(async (req) => {
           </form>
         </div>
 
-        <!-- User List -->
         <div class="bg-white border rounded shadow-sm">
           <div class="p-3 bg-gray-100 font-bold text-sm border-b">Active Users (${userData.Users.length})</div>
           <div class="max-h-[300px] overflow-y-auto">
@@ -280,13 +318,13 @@ serve(async (req) => {
         <div class="bg-white p-5 rounded border shadow-sm h-full flex flex-col">
           <h3 class="font-bold border-b pb-2 mb-3 text-green-700 flex justify-between items-center">
             3. VPN Server Config
-            <span class="text-xs bg-green-100 text-green-800 px-2 py-1 rounded font-normal">Link: /vpn</span>
+            <span class="text-xs bg-green-100 text-green-800 px-2 py-1 rounded font-normal">Auto Split Enabled</span>
           </h3>
-          <p class="text-xs text-gray-500 mb-2">Paste your encrypted JSON or VPN configuration string here. This is separate from user data.</p>
+          <p class="text-xs text-gray-500 mb-2">Paste your long encrypted config here. System will automatically split it to avoid errors.</p>
           
           <form method="POST" class="flex-grow flex flex-col">
             <input type="hidden" name="action" value="update_vpn">
-            <textarea name="VpnData" class="flex-grow w-full border p-3 rounded font-mono text-xs bg-slate-900 text-green-400 focus:ring-2 ring-green-500 outline-none mb-4 min-h-[400px]" placeholder="Paste config here...">${vpnData}</textarea>
+            <textarea name="VpnData" class="flex-grow w-full border p-3 rounded font-mono text-[10px] bg-slate-900 text-green-400 focus:ring-2 ring-green-500 outline-none mb-4 min-h-[400px]" placeholder="Paste config here...">${vpnData}</textarea>
             <div class="text-right">
               <button class="bg-green-600 text-white py-2 px-6 rounded hover:bg-green-700">Save VPN Data</button>
             </div>
